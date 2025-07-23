@@ -15,7 +15,3 @@
     "uuid": "^11.1.0"
   },
   "description": ""
-}
-"scripts": {
-  "start": "node index.js"
-}
