@@ -261,6 +261,16 @@ app.get('/search/:query', (req, res) => {
 
   res.json(matched);
 });
+app.get('/features/:id', (req, res) => {
+  const id = +req.params.id;
+  const level = levels.find(l => l.id === id);
+  if (!level) return res.status(404).json({ error: 'Level not found' });
+  
+  // Return metadata you want; here returning most properties except 'data'
+  const { data, ...metadata } = level;
+  res.json(metadata);
+});
+
 
 // --- 404 handler ---
 
