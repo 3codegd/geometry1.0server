@@ -242,6 +242,8 @@ app.get('/admin/levels', authenticate, requireAdmin, (req, res) => {
 });
 app.get('/search/:query', (req, res) => {
   const query = req.params.query.trim();
+  console.log('Search query:', query);
+
 
   if (!query) return res.status(400).json({ error: 'Empty search query' });
 
