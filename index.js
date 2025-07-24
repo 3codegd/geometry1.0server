@@ -3,12 +3,27 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const app = express();
 
+// Parse JSON bodies (application/json)
 app.use(express.json({ limit: '5mb' }));
+// Parse raw text bodies (text/plain)
+app.use(express.text({ type: 'text/plain', limit: '5mb' }));
+
+// Middleware: if Content-Type is text/plain, parse text as JSON
+app.use((req, res, next) => {
+  if (req.is('text/plain') && req.body) {
+    try {
+      req.body = JSON.parse(req.body);
+    } catch {
+      return res.status(400).json({ error: 'Invalid JSON in text/plain body' });
+    }
+  }
+  next();
+});
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 // In-memory "database"
-const users = []; 
+const users = [];
 const levels = [];
 
 let levelIdCounter = 1;
