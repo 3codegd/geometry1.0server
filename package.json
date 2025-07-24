@@ -8,11 +8,13 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@types/node": "^22.13.11",
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "uuid": "^11.1.0"
-  },
+"dependencies": {
+  "bcrypt": "^5.1.0",
+  "express": "^5.1.0",
+  "jsonwebtoken": "^9.0.0",
+  "cors": "^2.8.5",
+  "uuid": "^11.1.0"
+},
+
   "description": ""
 }
