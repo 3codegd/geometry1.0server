@@ -240,6 +240,25 @@ app.get('/admin/users', authenticate, requireAdmin, (req, res) => {
 app.get('/admin/levels', authenticate, requireAdmin, (req, res) => {
   res.json(levels);
 });
+app.get('/search/:query', (req, res) => {
+  const query = req.params.query.trim();
+
+  if (!query) return res.status(400).json({ error: 'Empty search query' });
+
+  // If query is a number, search by id
+  if (/^\d+$/.test(query)) {
+    const id = Number(query);
+    const level = levels.find(l => l.id === id);
+    if (!level) return res.status(404).json({ error: 'Level not found' });
+    return res.json([level]);
+  }
+
+  // Else, search by title/name starting with query (case-insensitive)
+  const lowerQuery = query.toLowerCase();
+  const matched = levels.filter(l => l.name.toLowerCase().startsWith(lowerQuery));
+
+  res.json(matched);
+});
 
 // --- 404 handler ---
 
