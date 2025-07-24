@@ -1,5 +1,6 @@
 const express = require("express");
 const fs = require("fs");
+const path = require("path");
 const app = express();
 
 app.use(express.json());
@@ -7,32 +8,34 @@ app.use(express.json());
 /* ----------------------------
    Helper: JSON File Management
 ----------------------------- */
-
-function loadJson(path, fallback = []) {
+function loadJson(filePath, fallback = []) {
   try {
-    return JSON.parse(fs.readFileSync(path, "utf8"));
-  } catch {
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, JSON.stringify(fallback, null, 2));
+    }
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    console.error(`Failed to load ${filePath}:`, err);
     return fallback;
   }
 }
 
-function saveJson(path, data) {
-  fs.writeFileSync(path, JSON.stringify(data, null, 2));
+function saveJson(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
 /* ----------------------------
-   Data Files (Stored Externally)
+   Data Files
 ----------------------------- */
-
 let ipBans = loadJson("ip-bans.json");
 let userBans = loadJson("user-bans.json");
 let users = loadJson("users.json");
 let completions = loadJson("completions.json");
+let levels = loadJson("levels.json"); // optional for /current
 
 /* ----------------------------
-   Authentication (Mocked)
+   Authentication (Mock)
 ----------------------------- */
-
 function mockAuth(req, res, next) {
   req.user = {
     username: "adminUser1",
@@ -51,7 +54,6 @@ app.use(mockAuth);
 /* ----------------------------
    Middleware: IP Ban Checker
 ----------------------------- */
-
 function ipBanMiddleware(req, res, next) {
   const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
   const now = Date.now();
@@ -73,7 +75,6 @@ app.use(ipBanMiddleware);
 /* ----------------------------
    Admin: IP Ban Routes
 ----------------------------- */
-
 app.post("/admin/tempban-ip", adminOnly, (req, res) => {
   const { ip, durationMinutes, reason } = req.body;
   if (!ip || !durationMinutes) {
@@ -113,7 +114,6 @@ app.get("/admin/ipbans", adminOnly, (req, res) => {
 /* ----------------------------
    Admin: Completions + Status
 ----------------------------- */
-
 app.get("/admin/completions/:user", adminOnly, (req, res) => {
   const username = req.params.user;
   const userCompletions = completions.filter(c => c.username === username);
@@ -145,34 +145,23 @@ app.get("/admin/status/:user", adminOnly, (req, res) => {
 });
 
 /* ----------------------------
-   Test Route
+   /current: Latest Level ID
 ----------------------------- */
+app.get("/current", (req, res) => {
+  const latestId = levels.length > 0 ? levels[levels.length - 1].id : 0;
+  res.json({ currentId: latestId });
+});
 
+/* ----------------------------
+   Root Route
+----------------------------- */
 app.get("/", (req, res) => {
-  res.send("Welcome to the server.");
+  res.send("✅ Server is running.");
 });
 
 /* ----------------------------
-   Custom 404 Handler
+   Custom 404 Handler with Logging
 ----------------------------- */
-
-app.use((req, res) => {
-  res.status(404).json({
-    error: `404: cannot ${req.method} ${req.originalUrl}`
-  });
-});
-
-/* ----------------------------
-   Start Server
------------------------------ */
-
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
-const path = require("path"); // already built into Node.js
-
-// Custom 404 handler with logging
 app.use((req, res) => {
   const method = req.method;
   const fullPath = req.originalUrl;
@@ -182,10 +171,17 @@ app.use((req, res) => {
   const logLine = `[${timestamp}] ⚠️ 404 - ${method} ${fullPath} from IP ${ip}`;
   console.warn(logLine);
 
-  // Optional: append to a log file
   fs.appendFileSync("access-log.txt", logLine + "\n");
 
   res.status(404).json({
     error: `000: cannot ${method} ${fullPath}`
   });
+});
+
+/* ----------------------------
+   Start Server
+----------------------------- */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ Server running on http://localhost:${PORT}`);
 });
