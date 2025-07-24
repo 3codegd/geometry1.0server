@@ -1,176 +1,178 @@
-const express = require("express");
-const fs = require("fs");
-const path = require("path");
-const dotenv = require("dotenv");
-dotenv.config();
-
+const express = require('express');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 const app = express();
-app.use(express.json());
 
-/* ----------------------------
-   Helper: JSON File Management
------------------------------ */
+app.use(express.json({ limit: '5mb' })); // increase limit if needed
 
-function loadJson(file, fallback = []) {
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/levels';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+
+mongoose.connect(MONGO_URI).then(() => console.log('MongoDB connected'));
+
+// ========== Models ==========
+
+const userSchema = new mongoose.Schema({
+  username: { type: String, unique: true },
+  passwordHash: String,
+  isAdmin: { type: Boolean, default: false }
+});
+const User = mongoose.model('User', userSchema);
+
+const levelSchema = new mongoose.Schema({
+  name: String,
+  creator: String,
+  data: Array,
+  description: String,
+  difficulty: { type: String, default: 'Not Set' },
+  featured: { type: Boolean, default: false },
+  downloads: { type: Number, default: 0 },
+  likes: { type: Number, default: 0 }
+});
+const Level = mongoose.model('Level', levelSchema);
+
+// ========== Middleware ==========
+
+function authenticate(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Missing token' });
+
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
   } catch {
-    return fallback;
+    res.status(403).json({ error: 'Invalid token' });
   }
 }
 
-function saveJson(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
-}
-
-/* ----------------------------
-   Data Files
------------------------------ */
-
-let ipBans = loadJson("ip-bans.json");
-let userBans = loadJson("user-bans.json");
-let users = loadJson("users.json");
-let completions = loadJson("completions.json");
-let levels = loadJson("levels.json");
-
-/* ----------------------------
-   Middleware: IP Ban Checker
------------------------------ */
-
-function ipBanMiddleware(req, res, next) {
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
-  const now = Date.now();
-
-  const ban = ipBans.find(b => b.ip === ip && b.expiresAt > now);
-  if (ban) {
-    return res.status(403).json({
-      error: "You are temporarily banned.",
-      reason: ban.reason,
-      expiresAt: ban.expiresAt
-    });
+function requireAdmin(req, res, next) {
+  if (!req.user?.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
   }
-
   next();
 }
-app.use(ipBanMiddleware);
 
-/* ----------------------------
-   Admin Auth Middleware (Password-Based)
------------------------------ */
+// ========== Auth Routes ==========
 
-function adminAuth(req, res, next) {
-  const auth = req.headers.authorization;
-  const adminPass = process.env.ADMIN_PASSWORD;
+app.post('/register', async (req, res) => {
+  const { username, password } = req.body;
+  const existing = await User.findOne({ username });
+  if (existing) return res.status(400).json({ error: 'Username taken' });
 
-  if (auth === `Bearer ${adminPass}`) {
-    req.user = { username: "admin", isAdmin: true };
-    return next();
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = new User({ username, passwordHash });
+  await user.save();
+
+  res.json({ message: 'Registered successfully' });
+});
+
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  const user = await User.findOne({ username });
+  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    return res.status(401).json({ error: 'Invalid credentials' });
   }
 
-  res.status(403).json({ error: "Admin access denied" });
-}
+  const token = jwt.sign({ username: user.username, isAdmin: user.isAdmin }, JWT_SECRET);
+  res.json({ token });
+});
 
-/* ----------------------------
-   Public: GET /levels
------------------------------ */
+// ========== Level Routes ==========
 
-app.get("/levels", (req, res) => {
+app.post('/levels', async (req, res) => {
+  const { data, name, user, desc } = req.body;
+
+  if (!Array.isArray(data) || !name || !user || !desc) {
+    return res.status(400).json({ error: 'Missing or invalid fields' });
+  }
+
+  const level = new Level({
+    name,
+    creator: user,
+    data,
+    description: desc
+  });
+
+  await level.save();
+  res.json({ message: 'Level uploaded', levelId: level._id });
+});
+
+app.get('/levels/:id', async (req, res) => {
+  const level = await Level.findById(req.params.id);
+  if (!level) return res.status(404).json({ error: 'Level not found' });
+
+  level.downloads++;
+  await level.save();
+
+  res.json(level);
+});
+
+app.post('/levels/:id/like', async (req, res) => {
+  const level = await Level.findById(req.params.id);
+  if (!level) return res.status(404).json({ error: 'Level not found' });
+
+  level.likes++;
+  await level.save();
+
+  res.json({ message: 'Level liked' });
+});
+
+// ========== Admin Routes ==========
+
+app.post('/admin/promote', authenticate, requireAdmin, async (req, res) => {
+  const { username } = req.body;
+  const user = await User.findOne({ username });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  user.isAdmin = true;
+  await user.save();
+  res.json({ message: `${username} promoted to admin.` });
+});
+
+app.post('/admin/feature', authenticate, requireAdmin, async (req, res) => {
+  const { levelId, featured } = req.body;
+  const level = await Level.findById(levelId);
+  if (!level) return res.status(404).json({ error: 'Level not found' });
+
+  level.featured = !!featured;
+  await level.save();
+  res.json({ message: `Level ${featured ? 'featured' : 'unfeatured'}` });
+});
+
+app.delete('/admin/level/:id', authenticate, requireAdmin, async (req, res) => {
+  const level = await Level.findByIdAndDelete(req.params.id);
+  if (!level) return res.status(404).json({ error: 'Level not found' });
+
+  res.json({ message: 'Level deleted' });
+});
+
+app.patch('/admin/level/:id', authenticate, requireAdmin, async (req, res) => {
+  const allowedFields = ['difficulty', 'description'];
+  const updates = {};
+
+  for (const field of allowedFields) {
+    if (req.body[field] !== undefined) updates[field] = req.body[field];
+  }
+
+  const level = await Level.findByIdAndUpdate(req.params.id, updates, { new: true });
+  if (!level) return res.status(404).json({ error: 'Level not found' });
+
+  res.json({ message: 'Level updated', level });
+});
+
+app.get('/admin/users', authenticate, requireAdmin, async (req, res) => {
+  const users = await User.find();
+  res.json(users);
+});
+
+app.get('/admin/levels', authenticate, requireAdmin, async (req, res) => {
+  const levels = await Level.find();
   res.json(levels);
 });
 
-/* ----------------------------
-   Admin: IP Ban Routes
------------------------------ */
-
-app.post("/admin/tempban-ip", adminAuth, (req, res) => {
-  const { ip, durationMinutes, reason } = req.body;
-  if (!ip || !durationMinutes) {
-    return res.status(400).json({ error: "IP and duration required" });
-  }
-
-  const expiresAt = Date.now() + durationMinutes * 60 * 1000;
-  ipBans.push({
-    ip,
-    reason: reason || "No reason provided",
-    bannedBy: req.user.username,
-    expiresAt
-  });
-
-  saveJson("ip-bans.json", ipBans);
-  res.json({ success: true });
-});
-
-app.post("/admin/unban-ip", adminAuth, (req, res) => {
-  const { ip } = req.body;
-  if (!ip) return res.status(400).json({ error: "IP required" });
-
-  const before = ipBans.length;
-  ipBans = ipBans.filter(b => b.ip !== ip);
-  saveJson("ip-bans.json", ipBans);
-  res.json({ success: true, removed: before - ipBans.length });
-});
-
-app.get("/admin/ipbans", adminAuth, (req, res) => {
-  const now = Date.now();
-  res.json(ipBans.filter(b => b.expiresAt > now));
-});
-
-/* ----------------------------
-   Admin: Completion + Status
------------------------------ */
-
-app.get("/admin/completions/:user", adminAuth, (req, res) => {
-  const name = req.params.user;
-  res.json(completions.filter(c => c.username === name));
-});
-
-app.get("/admin/banland", adminAuth, (req, res) => {
-  const now = Date.now();
-  res.json({
-    bannedIps: ipBans.filter(b => b.expiresAt > now),
-    bannedUsers: userBans.filter(b => b.expiresAt > now)
-  });
-});
-
-app.get("/admin/status/:user", adminAuth, (req, res) => {
-  const name = req.params.user;
-  const now = Date.now();
-  const banned = userBans.find(b => b.username === name && b.expiresAt > now);
-  const user = users.find(u => u.username === name);
-  res.json({
-    status: banned ? "banned" : "not banned",
-    isAdmin: user?.isAdmin ? "true" : "false"
-  });
-});
-
-/* ----------------------------
-   Root Route
------------------------------ */
-
-app.get("/", (req, res) => {
-  res.send("Welcome to the server.");
-});
-
-/* ----------------------------
-   Custom 404 Handler
------------------------------ */
-
-app.use((req, res) => {
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
-  const line = `[${new Date().toISOString()}] 404 - ${req.method} ${req.originalUrl} from ${ip}`;
-  console.warn(line);
-  fs.appendFileSync("access-log.txt", line + "\n");
-
-  res.status(404).json({
-    error: `000: cannot ${req.method} ${req.originalUrl}`
-  });
-});
-
-/* ----------------------------
-   Start Server
------------------------------ */
+// ========== Start Server ==========
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
