@@ -1,38 +1,20 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const app = express();
 
 app.use(express.json({ limit: '5mb' }));
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/levels';
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET || 'j1o2i1o2k02mlw';
 
-mongoose.connect(MONGO_URI).then(() => console.log('MongoDB connected'));
+// ===== In-memory "DB" =====
 
-// ========== Models ==========
+const users = []; // { username, passwordHash, isAdmin }
+const levels = []; // { id, name, creator, data, description, difficulty, featured, downloads, likes }
 
-const userSchema = new mongoose.Schema({
-  username: { type: String, unique: true },
-  passwordHash: String,
-  isAdmin: { type: Boolean, default: false }
-});
-const User = mongoose.model('User', userSchema);
+let levelIdCounter = 1;
 
-const levelSchema = new mongoose.Schema({
-  name: String,
-  creator: String,
-  data: Array,
-  description: String,
-  difficulty: { type: Number, default: 0 }, // 0=NA,1=Easy,2=Normal,3=Hard,4=Harder,5=Insane
-  featured: { type: Boolean, default: false },
-  downloads: { type: Number, default: 0 },
-  likes: { type: Number, default: 0 }
-});
-const Level = mongoose.model('Level', levelSchema);
-
-// ========== Middleware ==========
+// ===== Helpers =====
 
 function authenticate(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -48,124 +30,114 @@ function authenticate(req, res, next) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!req.user?.isAdmin) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
+  if (!req.user?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
   next();
 }
 
-// ========== Auth Routes ==========
+// ===== Auth =====
 
 app.post('/register', async (req, res) => {
   const { username, password } = req.body;
-  const existing = await User.findOne({ username });
-  if (existing) return res.status(400).json({ error: 'Username taken' });
+  if (!username || !password) return res.status(400).json({ error: 'Missing username or password' });
+
+  if (users.find(u => u.username === username)) {
+    return res.status(400).json({ error: 'Username taken' });
+  }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const user = new User({ username, passwordHash });
-  await user.save();
+  users.push({ username, passwordHash, isAdmin: false });
 
   res.json({ message: 'Registered successfully' });
 });
 
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
-  const user = await User.findOne({ username });
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
+  const user = users.find(u => u.username === username);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const valid = await bcrypt.compare(password, user.passwordHash);
+  if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
   const token = jwt.sign({ username: user.username, isAdmin: user.isAdmin }, JWT_SECRET);
   res.json({ token });
 });
 
-// ========== Level Upload ==========
+// ===== Level Upload =====
 
-app.post('/levels', async (req, res) => {
+app.post('/levels', (req, res) => {
   const { data, name, user, desc } = req.body;
-
   if (!Array.isArray(data) || !name || !user || !desc) {
     return res.status(400).json({ error: 'Missing or invalid fields' });
   }
 
-  const level = new Level({
+  const level = {
+    id: levelIdCounter++,
     name,
     creator: user,
     data,
-    description: desc
-  });
+    description: desc,
+    difficulty: 0, // default NA
+    featured: false,
+    downloads: 0,
+    likes: 0
+  };
 
-  await level.save();
-  res.json({ message: 'Level uploaded', levelId: level._id });
+  levels.push(level);
+  res.json({ message: 'Level uploaded', levelId: level.id });
 });
 
-// ========== Public Level Endpoints ==========
+// ===== Public Level Endpoints =====
 
 // Get level by ID
-app.get('/levels/:id', async (req, res) => {
-  const level = await Level.findById(req.params.id);
+app.get('/levels/:id', (req, res) => {
+  const level = levels.find(l => l.id === +req.params.id);
   if (!level) return res.status(404).json({ error: 'Level not found' });
 
   level.downloads++;
-  await level.save();
-
   res.json(level);
 });
 
 // Like a level
-app.post('/levels/:id/like', async (req, res) => {
-  const level = await Level.findById(req.params.id);
+app.post('/levels/:id/like', (req, res) => {
+  const level = levels.find(l => l.id === +req.params.id);
   if (!level) return res.status(404).json({ error: 'Level not found' });
 
   level.likes++;
-  await level.save();
-
   res.json({ message: 'Level liked' });
 });
 
-// List all levels (optionally sorted)
-app.get('/levels', async (req, res) => {
+// List all levels with optional sorting
+app.get('/levels', (req, res) => {
   const sortField = req.query.sort;
-  let sort = {};
+  let sortedLevels = [...levels];
 
-  if (sortField === 'likes') sort.likes = -1;
-  else if (sortField === 'downloads') sort.downloads = -1;
-  else if (sortField === 'featured') sort.featured = -1;
-  else sort._id = -1; // newest first
+  if (sortField === 'likes') sortedLevels.sort((a,b) => b.likes - a.likes);
+  else if (sortField === 'downloads') sortedLevels.sort((a,b) => b.downloads - a.downloads);
+  else if (sortField === 'featured') sortedLevels.sort((a,b) => (b.featured === a.featured)?0:(b.featured?1:-1));
+  else sortedLevels.sort((a,b) => b.id - a.id);
 
-  const levels = await Level.find().sort(sort);
-  res.json(levels);
+  res.json(sortedLevels);
 });
 
 // List levels by creator
-app.get('/levels/by/:user', async (req, res) => {
-  const levels = await Level.find({ creator: req.params.user }).sort({ _id: -1 });
-  res.json(levels);
+app.get('/levels/by/:user', (req, res) => {
+  const userLevels = levels.filter(l => l.creator === req.params.user).sort((a,b) => b.id - a.id);
+  res.json(userLevels);
 });
 
-// Get count of levels (with optional filters)
-app.get('/current', async (req, res) => {
-  const filter = {};
+// Count levels with optional filters
+app.get('/current', (req, res) => {
+  let filtered = [...levels];
 
-  if (req.query.user) {
-    filter.creator = req.query.user;
-  }
+  if (req.query.user) filtered = filtered.filter(l => l.creator === req.query.user);
+  if (req.query.featured !== undefined) filtered = filtered.filter(l => l.featured === (req.query.featured === 'true'));
+  if (req.query.difficulty !== undefined) filtered = filtered.filter(l => l.difficulty === +req.query.difficulty);
 
-  if (req.query.featured !== undefined) {
-    filter.featured = req.query.featured === 'true';
-  }
-
-  if (req.query.difficulty !== undefined) {
-    const diff = parseInt(req.query.difficulty);
-    if (!isNaN(diff)) filter.difficulty = diff;
-  }
-
-  const count = await Level.countDocuments(filter);
-  res.json({ count });
+  res.json({ count: filtered.length });
 });
 
-// Get stats summary, optionally filtered by user
-app.get('/stats', async (req, res) => {
+// Stats summary with optional user filter
+app.get('/stats', (req, res) => {
   const difficulties = {
     0: 'NA',
     1: 'Easy',
@@ -175,87 +147,80 @@ app.get('/stats', async (req, res) => {
     5: 'Insane'
   };
 
-  const filter = {};
-  if (req.query.user) {
-    filter.creator = req.query.user;
-  }
+  let filtered = levels;
+  if (req.query.user) filtered = filtered.filter(l => l.creator === req.query.user);
 
   const stats = {};
   for (let i = 0; i <= 5; i++) {
-    stats[difficulties[i]] = await Level.countDocuments({ ...filter, difficulty: i });
+    stats[difficulties[i]] = filtered.filter(l => l.difficulty === i).length;
   }
 
-  const featured = await Level.countDocuments({ ...filter, featured: true });
-  const total = await Level.countDocuments(filter);
+  const featuredCount = filtered.filter(l => l.featured).length;
+  const total = filtered.length;
 
   res.json({
     user: req.query.user || 'all',
     total,
-    featured,
+    featured: featuredCount,
     byDifficulty: stats
   });
 });
 
-// ========== Admin Routes ==========
+// ===== Admin Routes =====
 
-app.post('/admin/promote', authenticate, requireAdmin, async (req, res) => {
+app.post('/admin/promote', authenticate, requireAdmin, (req, res) => {
   const { username } = req.body;
-  const user = await User.findOne({ username });
+  const user = users.find(u => u.username === username);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   user.isAdmin = true;
-  await user.save();
   res.json({ message: `${username} promoted to admin.` });
 });
 
-app.post('/admin/feature', authenticate, requireAdmin, async (req, res) => {
+app.post('/admin/feature', authenticate, requireAdmin, (req, res) => {
   const { levelId, featured } = req.body;
-  const level = await Level.findById(levelId);
+  const level = levels.find(l => l.id === +levelId);
   if (!level) return res.status(404).json({ error: 'Level not found' });
 
   level.featured = !!featured;
-  await level.save();
   res.json({ message: `Level ${featured ? 'featured' : 'unfeatured'}` });
 });
 
-app.delete('/admin/level/:id', authenticate, requireAdmin, async (req, res) => {
-  const level = await Level.findByIdAndDelete(req.params.id);
-  if (!level) return res.status(404).json({ error: 'Level not found' });
+app.delete('/admin/level/:id', authenticate, requireAdmin, (req, res) => {
+  const index = levels.findIndex(l => l.id === +req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Level not found' });
 
+  levels.splice(index, 1);
   res.json({ message: 'Level deleted' });
 });
 
-app.patch('/admin/level/:id', authenticate, requireAdmin, async (req, res) => {
-  const allowedFields = ['difficulty', 'description'];
-  const updates = {};
-
-  for (const field of allowedFields) {
-    if (req.body[field] !== undefined) updates[field] = req.body[field];
-  }
-
-  const level = await Level.findByIdAndUpdate(req.params.id, updates, { new: true });
+app.patch('/admin/level/:id', authenticate, requireAdmin, (req, res) => {
+  const level = levels.find(l => l.id === +req.params.id);
   if (!level) return res.status(404).json({ error: 'Level not found' });
+
+  const allowedFields = ['difficulty', 'description'];
+  for (const field of allowedFields) {
+    if (req.body[field] !== undefined) level[field] = req.body[field];
+  }
 
   res.json({ message: 'Level updated', level });
 });
 
-app.get('/admin/users', authenticate, requireAdmin, async (req, res) => {
-  const users = await User.find();
+app.get('/admin/users', authenticate, requireAdmin, (req, res) => {
   res.json(users);
 });
 
-app.get('/admin/levels', authenticate, requireAdmin, async (req, res) => {
-  const levels = await Level.find();
+app.get('/admin/levels', authenticate, requireAdmin, (req, res) => {
   res.json(levels);
 });
 
-// ========== 404 Handler (must be last) ==========
+// ===== 404 Handler =====
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
-// ========== Start Server ==========
+// ===== Start Server =====
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
