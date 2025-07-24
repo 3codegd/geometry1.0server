@@ -59,6 +59,7 @@ app.post('/login', async (req, res) => {
 // --- Level Upload ---
 
 app.post('/levels', (req, res) => {
+  console.log('Body received:', req.body);
   const { data, name, user, desc } = req.body;
   if (!Array.isArray(data) || !name || !user || !desc) {
     return res.status(400).json({ error: 'Missing or invalid fields' });
