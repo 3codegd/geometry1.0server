@@ -1,47 +1,43 @@
 const express = require("express");
 const fs = require("fs");
-const path = require("path");
-const app = express();
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const { v4: uuidv4 } = require("uuid");
 
+const app = express();
 app.use(express.json());
 
-/* ----------------------------
-   Helper: JSON File Management
------------------------------ */
-function loadJson(filePath, fallback = []) {
+const USERS_FILE = "users.json";
+const SECRET_KEY = "your-very-secure-secret-key"; // Replace this with env variable in production
+
+/* --------- Helper functions --------- */
+function loadJson(path, fallback = []) {
   try {
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, JSON.stringify(fallback, null, 2));
-    }
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (err) {
-    console.error(`Failed to load ${filePath}:`, err);
+    return JSON.parse(fs.readFileSync(path, "utf8"));
+  } catch {
     return fallback;
   }
 }
 
-function saveJson(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+function saveJson(path, data) {
+  fs.writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
-/* ----------------------------
-   Data Files
------------------------------ */
-let ipBans = loadJson("ip-bans.json");
-let userBans = loadJson("user-bans.json");
-let users = loadJson("users.json");
-let completions = loadJson("completions.json");
-let levels = loadJson("levels.json"); // optional for /current
+/* --------- Authentication Middleware --------- */
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: "Missing Authorization header" });
 
-/* ----------------------------
-   Authentication (Mock)
------------------------------ */
-function mockAuth(req, res, next) {
-  req.user = {
-    username: "adminUser1",
-    isAdmin: true
-  };
-  next();
+  const token = authHeader.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Missing token" });
+
+  try {
+    const payload = jwt.verify(token, SECRET_KEY);
+    req.user = payload; // payload contains { id, username, isAdmin }
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
 }
 
 function adminOnly(req, res, next) {
@@ -49,139 +45,81 @@ function adminOnly(req, res, next) {
   res.status(403).json({ error: "Admin access required" });
 }
 
-app.use(mockAuth);
-
-/* ----------------------------
-   Middleware: IP Ban Checker
------------------------------ */
-function ipBanMiddleware(req, res, next) {
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
-  const now = Date.now();
-
-  const activeBan = ipBans.find(b => b.ip === ip && b.expiresAt > now);
-  if (activeBan) {
-    return res.status(403).json({
-      error: "You are temporarily banned.",
-      reason: activeBan.reason,
-      expiresAt: activeBan.expiresAt
-    });
+/* --------- User Registration --------- */
+app.post("/register", async (req, res) => {
+  const { username, password, isAdmin } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: "Username and password required" });
   }
 
-  next();
-}
-
-app.use(ipBanMiddleware);
-
-/* ----------------------------
-   Admin: IP Ban Routes
------------------------------ */
-app.post("/admin/tempban-ip", adminOnly, (req, res) => {
-  const { ip, durationMinutes, reason } = req.body;
-  if (!ip || !durationMinutes) {
-    return res.status(400).json({ error: "IP and duration required" });
+  let users = loadJson(USERS_FILE);
+  if (users.find(u => u.username === username)) {
+    return res.status(400).json({ error: "Username already taken" });
   }
 
-  const expiresAt = Date.now() + durationMinutes * 60 * 1000;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const newUser = {
+    id: uuidv4(),
+    username,
+    password: hashedPassword,
+    isAdmin: isAdmin === true // Only set if explicitly true, default false
+  };
+  users.push(newUser);
+  saveJson(USERS_FILE, users);
 
-  ipBans.push({
-    ip,
-    reason: reason || "No reason provided",
-    bannedBy: req.user.username,
-    expiresAt
-  });
-
-  saveJson("ip-bans.json", ipBans);
-  res.json({ success: true, message: `Banned ${ip} for ${durationMinutes} minutes.` });
+  res.json({ success: true, message: "User registered" });
 });
 
-app.post("/admin/unban-ip", adminOnly, (req, res) => {
-  const { ip } = req.body;
-  if (!ip) return res.status(400).json({ error: "IP required" });
+/* --------- User Login --------- */
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  const users = loadJson(USERS_FILE);
 
-  const before = ipBans.length;
-  ipBans = ipBans.filter(b => b.ip !== ip);
-  saveJson("ip-bans.json", ipBans);
-
-  res.json({ success: true, removed: before - ipBans.length });
-});
-
-app.get("/admin/ipbans", adminOnly, (req, res) => {
-  const now = Date.now();
-  const active = ipBans.filter(b => b.expiresAt > now);
-  res.json(active);
-});
-
-/* ----------------------------
-   Admin: Completions + Status
------------------------------ */
-app.get("/admin/completions/:user", adminOnly, (req, res) => {
-  const username = req.params.user;
-  const userCompletions = completions.filter(c => c.username === username);
-  res.json(userCompletions);
-});
-
-app.get("/admin/banland", adminOnly, (req, res) => {
-  const now = Date.now();
-  const activeIpBans = ipBans.filter(b => b.expiresAt > now);
-  const activeUserBans = userBans.filter(b => b.expiresAt > now);
-
-  res.json({
-    bannedIps: activeIpBans,
-    bannedUsers: activeUserBans
-  });
-});
-
-app.get("/admin/status/:user", adminOnly, (req, res) => {
-  const username = req.params.user;
   const user = users.find(u => u.username === username);
-  const now = Date.now();
+  if (!user) {
+    return res.status(401).json({ error: "Invalid username or password" });
+  }
 
-  const banned = userBans.find(b => b.username === username && b.expiresAt > now);
+  const passwordMatch = await bcrypt.compare(password, user.password);
+  if (!passwordMatch) {
+    return res.status(401).json({ error: "Invalid username or password" });
+  }
 
+  // Create JWT token
+  const token = jwt.sign(
+    { id: user.id, username: user.username, isAdmin: user.isAdmin },
+    SECRET_KEY,
+    { expiresIn: "1h" }
+  );
+
+  res.json({ success: true, token });
+});
+
+/* --------- Example Protected Route --------- */
+app.get("/profile", authMiddleware, (req, res) => {
   res.json({
-    status: banned ? "banned" : "not banned",
-    isAdmin: user?.isAdmin ? "true" : "false"
+    message: `Welcome, ${req.user.username}!`,
+    isAdmin: req.user.isAdmin
   });
 });
 
-/* ----------------------------
-   /current: Latest Level ID
------------------------------ */
-app.get("/current", (req, res) => {
-  const latestId = levels.length > 0 ? levels[levels.length - 1].id : 0;
-  res.json({ currentId: latestId });
+/* --------- Admin-only Route Example --------- */
+app.get("/admin/dashboard", authMiddleware, adminOnly, (req, res) => {
+  res.json({ message: "Welcome to the admin dashboard." });
 });
 
-/* ----------------------------
-   Root Route
------------------------------ */
-app.get("/", (req, res) => {
-  res.send("✅ Server is running.");
-});
+/* --------- Add your other routes here --------- */
 
-/* ----------------------------
-   Custom 404 Handler with Logging
------------------------------ */
+/* --------- Custom 404 --------- */
 app.use((req, res) => {
-  const method = req.method;
-  const fullPath = req.originalUrl;
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
-  const timestamp = new Date().toISOString();
-
-  const logLine = `[${timestamp}] ⚠️ 404 - ${method} ${fullPath} from IP ${ip}`;
-  console.warn(logLine);
-
-  fs.appendFileSync("access-log.txt", logLine + "\n");
-
   res.status(404).json({
-    error: `000: cannot ${method} ${fullPath}`
+    error: `000: cannot ${req.method} ${req.originalUrl}`
   });
 });
 
-/* ----------------------------
-   Start Server
------------------------------ */
-const PORT = process.env.PORT || 3000;
+/* --------- Start Server --------- */
+const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+
